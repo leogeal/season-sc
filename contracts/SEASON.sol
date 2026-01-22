@@ -196,6 +196,17 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
         rebalancer.setWeights(w);
     }
 
+    function setRebalanceMaxTradeBps(uint16 bps) external onlyOwner {
+	require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
+	rebalancer.setMaxTradeBps(bps);
+    }
+
+    function setRebalanceCooldownSeconds(uint32 secs) external onlyOwner {
+	require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
+	rebalancer.setCooldownSeconds(secs);
+    }
+
+
 
     // ---------------- Internal helpers ----------------
 

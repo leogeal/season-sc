@@ -24,6 +24,11 @@ contract SeasonRebalancer is Ownable {
     // max slippage tolerance for MockDex quotes (bps)
     uint16 public maxSlippageBps;
 
+    // Guardrails
+    uint16 public maxTradeBps;        // per-token trade budget per rebalance, in bps of starting balance (0..10000)
+    uint32 public cooldownSeconds;    // minimum seconds between rebalances
+    uint256 public lastRebalanceTs;   // last rebalance timestamp
+
     event Rebalanced(uint256[4] beforeBals, uint256[4] afterBals);
     event WeightsUpdated(uint16[4] weightsBps);
     event MaxSlippageUpdated(uint16 maxSlippageBps);
@@ -38,11 +43,17 @@ contract SeasonRebalancer is Ownable {
 	uint256 amountOut
     );
     event RebalanceFinished(uint256 indexed nonce, uint256 totalAfter, uint256[4] afterBals);
+    event MaxTradeBpsUpdated(uint16 maxTradeBps);
+    event CooldownSecondsUpdated(uint32 cooldownSeconds);
+
 
 
     constructor(address vaultAddr, address dexAddr, address initialOwner)
         Ownable(initialOwner)
     {
+	maxTradeBps = 10_000;      // default: no cap
+        cooldownSeconds = 0;       // default: no cooldown
+
         vault = SeasonVault(vaultAddr);
         dex = MockDex(dexAddr);
 
@@ -74,6 +85,11 @@ contract SeasonRebalancer is Ownable {
     ///
     /// IMPORTANT: This assumes 1:1 value per token unit or MockDex rates encode value.
     function rebalance() external onlyOwner {
+	if (cooldownSeconds != 0) {
+	    require(block.timestamp >= lastRebalanceTs + cooldownSeconds, "COOLDOWN");
+	}
+	lastRebalanceTs = block.timestamp;
+
 	uint256 nonce = ++rebalanceNonce;
 	
         uint256[4] memory beforeBals = vault.balances();
@@ -82,6 +98,14 @@ contract SeasonRebalancer is Ownable {
         require(total > 0, "EMPTY_VAULT");
 
 	emit RebalanceStarted(nonce, total, beforeBals);
+
+	uint256[4] memory budget;
+	uint256[4] memory spent;
+
+	for (uint256 i = 0; i < 4; i++) {
+	    budget[i] = Math.mulDiv(beforeBals[i], maxTradeBps, BPS_DENOM); // floor
+	}
+
 
         uint256[4] memory target;
         for (uint256 i = 0; i < 4; i++) {
@@ -93,25 +117,48 @@ contract SeasonRebalancer is Ownable {
 
         // 1) Sell excess into base
         for (uint256 i = 1; i < 4; i++) {
-            if (beforeBals[i] > target[i]) {
-                uint256 excess = beforeBals[i] - target[i];
-                _swapFromVault(nonce, vault.tokenAddress(i), base, excess);
-                beforeBals[i] -= excess;
-                beforeBals[0] += excess; // approximate book update; actual will follow balances check
-            }
-        }
+	    if (beforeBals[i] > target[i]) {
+		uint256 excess = beforeBals[i] - target[i];
+
+		uint256 remaining = (budget[i] > spent[i]) ? (budget[i] - spent[i]) : 0;
+		if (remaining == 0) continue;
+
+		uint256 amountIn = excess;
+		if (amountIn > remaining) amountIn = remaining;
+		if (amountIn == 0) continue;
+
+		spent[i] += amountIn;
+		_swapFromVault(nonce, vault.tokenAddress(i), base, amountIn);
+	    }
+	}
 
         // Refresh base balance after sells (real balances)
         uint256[4] memory midBals = vault.balances();
 
         // 2) Buy deficits using base
-        for (uint256 i = 1; i < 4; i++) {
-            if (midBals[i] < target[i]) {
-                uint256 need = target[i] - midBals[i];
-                // spend base to buy 'need' of token i, assuming rate and liquidity allow.
-                _swapFromVault(nonce, base, vault.tokenAddress(i), need);
-            }
-        }
+	for (uint256 i = 1; i < 4; i++) {
+	    if (midBals[i] < target[i]) {
+		uint256 need = target[i] - midBals[i];
+
+		uint256 remainingBaseBudget = (budget[0] > spent[0]) ? (budget[0] - spent[0]) : 0;
+		if (remainingBaseBudget == 0) continue;
+
+		// can't spend more base than we have
+		uint256 baseAvail = midBals[0];
+		if (baseAvail == 0) continue;
+
+		uint256 amountIn = need;
+		if (amountIn > remainingBaseBudget) amountIn = remainingBaseBudget;
+		if (amountIn > baseAvail) amountIn = baseAvail;
+		if (amountIn == 0) continue;
+
+		spent[0] += amountIn;
+		_swapFromVault(nonce, base, vault.tokenAddress(i), amountIn);
+
+		// refresh base balance for subsequent buys (so we don't overspend if price != 1:1 later)
+		midBals = vault.balances();
+	    }
+	}
 
         uint256[4] memory afterBals = vault.balances();
 	uint256 totalAfter;
@@ -134,4 +181,16 @@ contract SeasonRebalancer is Ownable {
 
 	emit SwapExecuted(nonce, tokenIn, tokenOut, amountIn, quotedOut, minOut, amountOut);
     }
+
+    function setMaxTradeBps(uint16 bps) external onlyOwner {
+	require(bps <= BPS_DENOM, "MAX_TRADE_BPS_TOO_HIGH");
+	maxTradeBps = bps;
+	emit MaxTradeBpsUpdated(bps);
+    }
+
+    function setCooldownSeconds(uint32 secs) external onlyOwner {
+	cooldownSeconds = secs;
+	emit CooldownSecondsUpdated(secs);
+    }
+
 }
