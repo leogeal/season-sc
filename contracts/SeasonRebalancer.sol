@@ -28,6 +28,7 @@ contract SeasonRebalancer is Ownable {
     uint16 public maxTradeBps;        // per-token trade budget per rebalance, in bps of starting balance (0..10000)
     uint32 public cooldownSeconds;    // minimum seconds between rebalances
     uint256 public lastRebalanceTs;   // last rebalance timestamp
+    uint8 public maxSwapsPerRebalance; // 0 = unlimited
 
     event Rebalanced(uint256[4] beforeBals, uint256[4] afterBals);
     event WeightsUpdated(uint16[4] weightsBps);
@@ -45,7 +46,7 @@ contract SeasonRebalancer is Ownable {
     event RebalanceFinished(uint256 indexed nonce, uint256 totalAfter, uint256[4] afterBals);
     event MaxTradeBpsUpdated(uint16 maxTradeBps);
     event CooldownSecondsUpdated(uint32 cooldownSeconds);
-
+    event MaxSwapsPerRebalanceUpdated(uint8 maxSwapsPerRebalance);
 
 
     constructor(address vaultAddr, address dexAddr, address initialOwner)
@@ -53,6 +54,7 @@ contract SeasonRebalancer is Ownable {
     {
 	maxTradeBps = 10_000;      // default: no cap
         cooldownSeconds = 0;       // default: no cooldown
+	maxSwapsPerRebalance = 0; // default: unlimited
 
         vault = SeasonVault(vaultAddr);
         dex = MockDex(dexAddr);
@@ -99,6 +101,8 @@ contract SeasonRebalancer is Ownable {
 
 	emit RebalanceStarted(nonce, total, beforeBals);
 
+	uint256 swapsDone = 0;
+
 	uint256[4] memory budget;
 	uint256[4] memory spent;
 
@@ -129,6 +133,7 @@ contract SeasonRebalancer is Ownable {
 
 		spent[i] += amountIn;
 		_swapFromVault(nonce, vault.tokenAddress(i), base, amountIn);
+		_swapsGuard(++swapsDone);
 	    }
 	}
 
@@ -154,6 +159,7 @@ contract SeasonRebalancer is Ownable {
 
 		spent[0] += amountIn;
 		_swapFromVault(nonce, base, vault.tokenAddress(i), amountIn);
+		_swapsGuard(++swapsDone);
 
 		// refresh base balance for subsequent buys (so we don't overspend if price != 1:1 later)
 		midBals = vault.balances();
@@ -182,6 +188,14 @@ contract SeasonRebalancer is Ownable {
 	emit SwapExecuted(nonce, tokenIn, tokenOut, amountIn, quotedOut, minOut, amountOut);
     }
 
+    function _swapsGuard(uint256 swapsDone) internal view {
+	uint8 maxS = maxSwapsPerRebalance;
+	if (maxS != 0) {
+	    require(swapsDone <= maxS, "MAX_SWAPS");
+	}
+    }
+
+
     function setMaxTradeBps(uint16 bps) external onlyOwner {
 	require(bps <= BPS_DENOM, "MAX_TRADE_BPS_TOO_HIGH");
 	maxTradeBps = bps;
@@ -192,5 +206,12 @@ contract SeasonRebalancer is Ownable {
 	cooldownSeconds = secs;
 	emit CooldownSecondsUpdated(secs);
     }
+
+    function setMaxSwapsPerRebalance(uint8 n) external onlyOwner {
+	// n=0 means unlimited, otherwise enforce some reasonable upper bound if you want.
+	maxSwapsPerRebalance = n;
+	emit MaxSwapsPerRebalanceUpdated(n);
+    }
+
 
 }

@@ -206,6 +206,10 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
 	rebalancer.setCooldownSeconds(secs);
     }
 
+    function setRebalanceMaxSwapsPerRebalance(uint8 n) external onlyOwner {
+	require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
+	rebalancer.setMaxSwapsPerRebalance(n);
+    }
 
 
     // ---------------- Internal helpers ----------------
