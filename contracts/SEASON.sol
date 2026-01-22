@@ -9,10 +9,14 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import "./SeasonVault.sol";
 
+import "./SeasonRebalancer.sol";
+
 contract SEASON is ERC20, Ownable, ReentrancyGuard {
     using Math for uint256;
 
     SeasonVault public immutable vault;
+
+    SeasonRebalancer public rebalancer;
 
     uint256 public constant NUM_TOKENS = 4;
     uint256 public constant BPS_DENOM = 10_000;
@@ -27,6 +31,9 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
     event Burned(address indexed user, uint256 sharesBurned, uint256 sharesFee, uint256[4] amountsReturned);
     event FeesUpdated(uint16 mintFeeBps, uint16 redeemFeeBps);
     event FeeRecipientUpdated(address indexed feeRecipient);
+
+    event RebalancerUpdated(address indexed rebalancer);
+    event VaultOperatorUpdated(address indexed operator);
 
     constructor(address vaultAddr, address initialOwner, address _feeRecipient)
         ERC20("Season Index Token", "SEASON")
@@ -161,6 +168,34 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
         emit Burned(msg.sender, sharesToBurn, feeShares, amountsReturned);
         return (netShares, feeShares, amountsReturned);
     }
+
+    /// @notice Set the rebalancer module. This does not automatically authorize it in the vault.
+    function setRebalancer(address rebalancerAddr) external onlyOwner {
+	require(rebalancerAddr != address(0), "REBALANCER_ZERO");
+	rebalancer = SeasonRebalancer(rebalancerAddr);
+	emit RebalancerUpdated(rebalancerAddr);
+    }
+
+    /// @notice Authorize an operator in the vault (typically the rebalancer).
+    /// @dev SEASON owns the vault, so SEASON can set the operator directly.
+    function setVaultOperator(address operatorAddr) external onlyOwner {
+	vault.setOperator(operatorAddr);
+	emit VaultOperatorUpdated(operatorAddr);
+    }
+
+    /// @notice Run a rebalance via the configured rebalancer module.
+    /// @dev For safety, keep this onlyOwner initially. You can later add keeper logic.
+    function rebalance() external onlyOwner {
+	address r = address(rebalancer);
+	require(r != address(0), "REBALANCER_NOT_SET");
+	rebalancer.rebalance();
+    }
+
+    function setRebalanceWeights(uint16[4] calldata w) external onlyOwner {
+        require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
+        rebalancer.setWeights(w);
+    }
+
 
     // ---------------- Internal helpers ----------------
 
