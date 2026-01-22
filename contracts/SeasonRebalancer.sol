@@ -13,6 +13,8 @@ contract SeasonRebalancer is Ownable {
     uint256 public constant NUM_TOKENS = 4;
     uint256 public constant BPS_DENOM = 10_000;
 
+    uint256 public rebalanceNonce;
+
     SeasonVault public immutable vault;
     MockDex public immutable dex;
 
@@ -25,6 +27,18 @@ contract SeasonRebalancer is Ownable {
     event Rebalanced(uint256[4] beforeBals, uint256[4] afterBals);
     event WeightsUpdated(uint16[4] weightsBps);
     event MaxSlippageUpdated(uint16 maxSlippageBps);
+    event RebalanceStarted(uint256 indexed nonce, uint256 totalBefore, uint256[4] beforeBals);
+    event SwapExecuted(
+	uint256 indexed nonce,
+	address indexed tokenIn,
+	address indexed tokenOut,
+	uint256 amountIn,
+	uint256 quotedOut,
+	uint256 minOut,
+	uint256 amountOut
+    );
+    event RebalanceFinished(uint256 indexed nonce, uint256 totalAfter, uint256[4] afterBals);
+
 
     constructor(address vaultAddr, address dexAddr, address initialOwner)
         Ownable(initialOwner)
@@ -60,10 +74,14 @@ contract SeasonRebalancer is Ownable {
     ///
     /// IMPORTANT: This assumes 1:1 value per token unit or MockDex rates encode value.
     function rebalance() external onlyOwner {
+	uint256 nonce = ++rebalanceNonce;
+	
         uint256[4] memory beforeBals = vault.balances();
         uint256 total;
         for (uint256 i = 0; i < 4; i++) total += beforeBals[i];
         require(total > 0, "EMPTY_VAULT");
+
+	emit RebalanceStarted(nonce, total, beforeBals);
 
         uint256[4] memory target;
         for (uint256 i = 0; i < 4; i++) {
@@ -77,7 +95,7 @@ contract SeasonRebalancer is Ownable {
         for (uint256 i = 1; i < 4; i++) {
             if (beforeBals[i] > target[i]) {
                 uint256 excess = beforeBals[i] - target[i];
-                _swapFromVault(vault.tokenAddress(i), base, excess);
+                _swapFromVault(nonce, vault.tokenAddress(i), base, excess);
                 beforeBals[i] -= excess;
                 beforeBals[0] += excess; // approximate book update; actual will follow balances check
             }
@@ -91,23 +109,29 @@ contract SeasonRebalancer is Ownable {
             if (midBals[i] < target[i]) {
                 uint256 need = target[i] - midBals[i];
                 // spend base to buy 'need' of token i, assuming rate and liquidity allow.
-                _swapFromVault(base, vault.tokenAddress(i), need);
+                _swapFromVault(nonce, base, vault.tokenAddress(i), need);
             }
         }
 
         uint256[4] memory afterBals = vault.balances();
+	uint256 totalAfter;
+	for (uint256 i = 0; i < 4; i++) totalAfter += afterBals[i];
+
+	emit RebalanceFinished(nonce, totalAfter, afterBals);
         emit Rebalanced(beforeBals, afterBals);
     }
 
-    function _swapFromVault(address tokenIn, address tokenOut, uint256 amountIn) internal {
-        // Approve DEX pull
-        vault.approveToken(tokenIn, address(dex), amountIn);
+    function _swapFromVault(uint256 nonce, address tokenIn, address tokenOut, uint256 amountIn) internal {
+	// Approve DEX pull
+	vault.approveToken(tokenIn, address(dex), amountIn);
 
-        // minOut based on quoted out and maxSlippageBps
-        uint256 quotedOut = dex.quote(tokenIn, tokenOut, amountIn);
-        uint256 minOut = Math.mulDiv(quotedOut, (BPS_DENOM - maxSlippageBps), BPS_DENOM);
+	// quote and minOut (slippage guard)
+	uint256 quotedOut = dex.quote(tokenIn, tokenOut, amountIn);
+	uint256 minOut = Math.mulDiv(quotedOut, (BPS_DENOM - maxSlippageBps), BPS_DENOM);
 
-        // Execute: DEX pulls from vault and sends output back to vault
-        dex.swapExactIn(address(vault), tokenIn, tokenOut, amountIn, minOut, address(vault));
+	// Execute: DEX pulls from vault and sends output back to vault
+	uint256 amountOut = dex.swapExactIn(address(vault), tokenIn, tokenOut, amountIn, minOut, address(vault));
+
+	emit SwapExecuted(nonce, tokenIn, tokenOut, amountIn, quotedOut, minOut, amountOut);
     }
 }
