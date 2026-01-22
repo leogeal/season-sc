@@ -29,6 +29,7 @@ contract SeasonRebalancer is Ownable {
     uint32 public cooldownSeconds;    // minimum seconds between rebalances
     uint256 public lastRebalanceTs;   // last rebalance timestamp
     uint8 public maxSwapsPerRebalance; // 0 = unlimited
+    uint256 public minTradeAmount; // minimum amountIn to execute a swap (applies to all tokens)
 
     event Rebalanced(uint256[4] beforeBals, uint256[4] afterBals);
     event WeightsUpdated(uint16[4] weightsBps);
@@ -47,6 +48,7 @@ contract SeasonRebalancer is Ownable {
     event MaxTradeBpsUpdated(uint16 maxTradeBps);
     event CooldownSecondsUpdated(uint32 cooldownSeconds);
     event MaxSwapsPerRebalanceUpdated(uint8 maxSwapsPerRebalance);
+    event MinTradeAmountUpdated(uint256 minTradeAmount);
 
 
     constructor(address vaultAddr, address dexAddr, address initialOwner)
@@ -55,6 +57,7 @@ contract SeasonRebalancer is Ownable {
 	maxTradeBps = 10_000;      // default: no cap
         cooldownSeconds = 0;       // default: no cooldown
 	maxSwapsPerRebalance = 0; // default: unlimited
+	minTradeAmount = 0; // default: no minimum (execute all)
 
         vault = SeasonVault(vaultAddr);
         dex = MockDex(dexAddr);
@@ -131,6 +134,9 @@ contract SeasonRebalancer is Ownable {
 		if (amountIn > remaining) amountIn = remaining;
 		if (amountIn == 0) continue;
 
+		// skip dust
+		if (minTradeAmount != 0 && amountIn < minTradeAmount) continue;
+
 		spent[i] += amountIn;
 		_swapFromVault(nonce, vault.tokenAddress(i), base, amountIn);
 		_swapsGuard(++swapsDone);
@@ -156,6 +162,9 @@ contract SeasonRebalancer is Ownable {
 		if (amountIn > remainingBaseBudget) amountIn = remainingBaseBudget;
 		if (amountIn > baseAvail) amountIn = baseAvail;
 		if (amountIn == 0) continue;
+
+		// skip dust
+		if (minTradeAmount != 0 && amountIn < minTradeAmount) continue;
 
 		spent[0] += amountIn;
 		_swapFromVault(nonce, base, vault.tokenAddress(i), amountIn);
@@ -212,6 +221,12 @@ contract SeasonRebalancer is Ownable {
 	maxSwapsPerRebalance = n;
 	emit MaxSwapsPerRebalanceUpdated(n);
     }
+
+    function setMinTradeAmount(uint256 amt) external onlyOwner {
+	minTradeAmount = amt;
+	emit MinTradeAmountUpdated(amt);
+    }
+
 
 
 }
