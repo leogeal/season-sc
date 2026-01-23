@@ -40,6 +40,12 @@ describe("SEASON invariants WITH rebalances (conservation incl. DEX)", function 
     return totals;
   }
 
+  function entitlementPerToken(vaultBals, feeShares, totalSupply) {
+    // floor(vaultBal[i] * feeShares / totalSupply)
+    if (totalSupply.isZero()) return vaultBals.map(() => ethers.BigNumber.from(0));
+    return vaultBals.map(b => b.mul(feeShares).div(totalSupply));
+  }
+    
   async function approveBig(signer) {
     const big = ethers.utils.parseUnits("1000000000", 18);
     for (let i = 0; i < 4; i++) {
@@ -268,4 +274,133 @@ describe("SEASON invariants WITH rebalances (conservation incl. DEX)", function 
       expect(diff).to.be.lte(dust);
     }
   });
+
+  it("Invariant (fees on): conservation incl. DEX holds; mint->burn cannot profit; fee-recipient claim explains loss (± dust)", async function () {
+    // Turn ON share fees (bps). Adjust as you like.
+    const entryBps = 50; // 0.50%
+    const exitBps  = 50; // 0.50%
+    await season.connect(owner).setFees(entryBps, exitBps);
+
+    const addresses = [
+      vault.address,
+      dex.address,
+      u1.address,
+      u2.address,
+      u3.address,
+      season.address,
+      rebal.address,
+      owner.address, // fee recipient in your deployments
+    ];
+
+    // Baseline conservation snapshot (no more underlying minting after beforeEach)
+    const baseline = await totalsPerToken(addresses);
+
+    // ---- Mixed ops + rebalances (same style as previous test) ----
+    const rng = xorshift32(0xFEEDBEEF);
+    const STEPS = 50;
+
+    for (let step = 0; step < STEPS; step++) {
+      const r = rng() % 100;
+
+      if (r < 45) {
+	// mintWithDeposit (u2/u3)
+	const actor = (rng() % 2 === 0) ? u2 : u3;
+	const bals = await bal4(actor.address);
+
+	const max = [];
+	for (let i = 0; i < 4; i++) {
+	  const whole = randInt(rng, 1, 40);
+	  const want = ethers.utils.parseUnits(String(whole), 18);
+	  max.push(want.lte(bals[i]) ? want : bals[i]);
+	}
+	if (max.some(x => x.isZero())) continue;
+
+	try {
+	  await season.connect(actor).mintWithDeposit(max);
+	} catch (_) {
+	  // ratio / rounding rejections are ok in fuzz-y loop
+	  continue;
+	}
+      } else if (r < 85) {
+	// burnToRedeem (u2/u3)
+	const actor = (rng() % 2 === 0) ? u2 : u3;
+	const shares = await season.balanceOf(actor.address);
+	if (shares.isZero()) continue;
+
+	const frac = randInt(rng, 5, 40);
+	const amt = shares.mul(frac).div(100);
+	if (amt.isZero()) continue;
+
+	await season.connect(actor).burnToRedeem(amt);
+      } else {
+	// rebalance (owner)
+	await season.connect(owner).rebalance();
+      }
+
+      // Conservation (per-token) across vault+DEX+users+contracts must hold exactly
+      const nowTotals = await totalsPerToken(addresses);
+      for (let i = 0; i < 4; i++) {
+	expect(nowTotals[i]).to.equal(baseline[i]);
+      }
+    }
+
+    // ---- Fees-aware round-trip check (no profit + fee claim accounting) ----
+    const actor = u2;
+
+    // Snapshot actor underlying + fee-recipient share claim BEFORE round-trip
+    const userBefore = await bal4(actor.address);
+
+    const feeSharesBefore = await season.balanceOf(owner.address);
+    const supplyBefore = await season.totalSupply();
+    const vaultBefore = await vault.balances();
+    const feeEntBefore = entitlementPerToken(vaultBefore, feeSharesBefore, supplyBefore);
+
+    // Do a fresh deposit (non-dust) and burn back the *net minted shares*
+    const deposit = [
+      ethers.utils.parseUnits("37", 18),
+      ethers.utils.parseUnits("19", 18),
+      ethers.utils.parseUnits("23", 18),
+      ethers.utils.parseUnits("11", 18),
+    ];
+
+    const shares0 = await season.balanceOf(actor.address);
+    await season.connect(actor).mintWithDeposit(deposit);
+    const shares1 = await season.balanceOf(actor.address);
+
+    const mintedNet = shares1.sub(shares0);
+    expect(mintedNet).to.be.gt(0);
+
+    await season.connect(actor).burnToRedeem(mintedNet);
+
+    const userAfter = await bal4(actor.address);
+
+    // 1) No-profit: user cannot end up with more underlying than before (± dust)
+    const dust = bn(40); // allow tiny rounding
+    let anyLoss = false;
+    for (let i = 0; i < 4; i++) {
+      // userAfter[i] <= userBefore[i] + dust
+      expect(userAfter[i]).to.be.lte(userBefore[i].add(dust));
+      if (userAfter[i].add(dust).lt(userBefore[i])) anyLoss = true;
+    }
+    // With nonzero fees we expect some loss in typical cases
+    expect(anyLoss).to.equal(true);
+
+    // 2) Fee-recipient claim explains (most of) user loss:
+    //    Δ feeEntitlement ≈ userLoss, within rounding dust
+    const feeSharesAfter = await season.balanceOf(owner.address);
+    const supplyAfter = await season.totalSupply();
+    const vaultAfter = await vault.balances();
+    const feeEntAfter = entitlementPerToken(vaultAfter, feeSharesAfter, supplyAfter);
+
+    const explainDust = bn(200); // a bit looser because entitlement uses floor divisions
+    for (let i = 0; i < 4; i++) {
+      const userLoss = userBefore[i].sub(userAfter[i]); // should be >= 0 (ignoring dust)
+      const feeGain = feeEntAfter[i].sub(feeEntBefore[i]); // should be >= 0
+
+      // feeGain should be close to userLoss (allow rounding slack)
+      const diff = userLoss.sub(feeGain).abs();
+      expect(diff).to.be.lte(explainDust);
+    }
+  });
+
 });
