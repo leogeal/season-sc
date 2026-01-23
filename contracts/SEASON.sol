@@ -216,6 +216,10 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
 	rebalancer.setMinTradeAmount(amt);
     }
 
+    function setRebalanceMinDriftBps(uint16 bps) external onlyOwner {
+	require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
+	rebalancer.setMinDriftBps(bps);
+    }
 
     // ---------------- Internal helpers ----------------
 

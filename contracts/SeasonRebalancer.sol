@@ -30,6 +30,7 @@ contract SeasonRebalancer is Ownable {
     uint256 public lastRebalanceTs;   // last rebalance timestamp
     uint8 public maxSwapsPerRebalance; // 0 = unlimited
     uint256 public minTradeAmount; // minimum amountIn to execute a swap (applies to all tokens)
+    uint16 public minDriftBps; // minimum max deviation (in bps) required to perform swaps
 
     event Rebalanced(uint256[4] beforeBals, uint256[4] afterBals);
     event WeightsUpdated(uint16[4] weightsBps);
@@ -49,7 +50,13 @@ contract SeasonRebalancer is Ownable {
     event CooldownSecondsUpdated(uint32 cooldownSeconds);
     event MaxSwapsPerRebalanceUpdated(uint8 maxSwapsPerRebalance);
     event MinTradeAmountUpdated(uint256 minTradeAmount);
-
+    event MinDriftBpsUpdated(uint16 minDriftBps);
+    event RebalanceSkipped(
+	uint256 indexed nonce,
+	uint16 maxDriftBps,
+	uint16[4] currentWeightsBps,
+	uint16[4] targetWeightsBps
+    );
 
     constructor(address vaultAddr, address dexAddr, address initialOwner)
         Ownable(initialOwner)
@@ -58,6 +65,7 @@ contract SeasonRebalancer is Ownable {
         cooldownSeconds = 0;       // default: no cooldown
 	maxSwapsPerRebalance = 0; // default: unlimited
 	minTradeAmount = 0; // default: no minimum (execute all)
+	minDriftBps = 0; // default: always allow rebalances
 
         vault = SeasonVault(vaultAddr);
         dex = MockDex(dexAddr);
@@ -118,6 +126,20 @@ contract SeasonRebalancer is Ownable {
         for (uint256 i = 0; i < 4; i++) {
             target[i] = Math.mulDiv(total, weightsBps[i], BPS_DENOM); // floor
         }
+
+	// Min drift threshold: skip if already close enough to target
+	if (minDriftBps != 0) {
+	    (uint16[4] memory curW, uint16 maxD) = _computeWeightsAndMaxDrift(beforeBals, weightsBps);
+	    if (maxD < minDriftBps) {
+		emit RebalanceSkipped(nonce, maxD, curW, weightsBps);
+
+		// No swaps; finished state equals starting state
+		emit RebalanceFinished(nonce, total, beforeBals);
+		emit Rebalanced(beforeBals, beforeBals);
+		return;
+	    }
+	}
+
 
         // Use token0 as base
         address base = vault.tokenAddress(0);
@@ -204,6 +226,28 @@ contract SeasonRebalancer is Ownable {
 	}
     }
 
+    function _computeWeightsAndMaxDrift(uint256[4] memory bals, uint16[4] memory target)
+	internal
+	pure
+	returns (uint16[4] memory current, uint16 maxDrift)
+    {
+	uint256 total;
+	for (uint256 i = 0; i < 4; i++) total += bals[i];
+	if (total == 0) return (current, 0);
+
+	for (uint256 i = 0; i < 4; i++) {
+	    uint256 w = Math.mulDiv(bals[i], BPS_DENOM, total); // floor
+	    if (w > type(uint16).max) w = type(uint16).max;
+	    current[i] = uint16(w);
+
+	    uint16 t = target[i];
+	    uint16 c = current[i];
+	    uint16 d = c >= t ? (c - t) : (t - c);
+	    if (d > maxDrift) maxDrift = d;
+	}
+    }
+
+
 
     function setMaxTradeBps(uint16 bps) external onlyOwner {
 	require(bps <= BPS_DENOM, "MAX_TRADE_BPS_TOO_HIGH");
@@ -227,6 +271,11 @@ contract SeasonRebalancer is Ownable {
 	emit MinTradeAmountUpdated(amt);
     }
 
+    function setMinDriftBps(uint16 bps) external onlyOwner {
+	require(bps <= BPS_DENOM, "MIN_DRIFT_TOO_HIGH");
+	minDriftBps = bps;
+	emit MinDriftBpsUpdated(bps);
+    }
 
 
 }
