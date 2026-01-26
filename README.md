@@ -1,6 +1,7 @@
-# Sample Hardhat Project
+# SEASON: An ERC20 investment fund which implements cyclical trading of Seasonal Tokens.
 
-This project demonstrates a basic Hardhat use case. It comes with a sample contract, a test for that contract, and a Hardhat Ignition module that deploys that contract.
+This project implements an ERC20 smart contract into which, as mint (creation) operation, one can deposit Seasonal Tokens, and SEASON will do cyclical trading of its portfolio of Seasonal Tokens. There is also a "burn" operation, which redeems one's share of the SEASON investment portfolio.
+The project includes tests.
 
 Try running some of the following tasks:
 
@@ -8,6 +9,4 @@ Try running some of the following tasks:
 npx hardhat help
 npx hardhat test
 REPORT_GAS=true npx hardhat test
-npx hardhat node
-npx hardhat ignition deploy ./ignition/modules/Lock.js
 ```
