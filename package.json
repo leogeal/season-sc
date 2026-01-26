@@ -6,6 +6,15 @@
     "chai": "^4.5.0",
     "ethereum-waffle": "^3.4.4",
     "ethers": "^5.8.0",
-    "hardhat": "^2.19.5"
+    "hardhat": "2.19.5",
+    "hardhat-gas-reporter": "^2.3.0",
+    "solidity-coverage": "^0.8.17"
+  },
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "coverage": "hardhat coverage",
+    "gas": "REPORT_GAS=1 hardhat test"
   }
+
 }
