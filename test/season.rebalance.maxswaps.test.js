@@ -4,7 +4,18 @@ const { ethers } = require("hardhat");
 describe("SeasonRebalancer guardrail: max swaps per rebalance", function () {
   let owner, u1;
   let spring, summer, autumn, winter, tokens;
-  let vault, season, dex, rebal;
+  let vault, season, dex, rebal, oracle;
+
+  const P = (x) => ethers.utils.parseUnits(String(x), 18);
+
+  async function seedSkewedVault() {
+    const dep = [P(1000), P(50), P(50), P(50)];
+    for (let i = 0; i < 4; i++) {
+      await tokens[i].mint(u1.address, dep[i]);
+      await tokens[i].connect(u1).approve(season.address, dep[i]);
+    }
+    await season.connect(u1).mintWithDeposit(dep);
+  }
 
   beforeEach(async function () {
     [owner, u1] = await ethers.getSigners();
@@ -25,20 +36,28 @@ describe("SeasonRebalancer guardrail: max swaps per rebalance", function () {
     const Dex = await ethers.getContractFactory("MockDex");
     dex = await Dex.deploy(owner.address);
 
-    // 1:1 rates for all pairs
-    const ONE = ethers.utils.parseUnits("1", 18);
+    const Oracle = await ethers.getContractFactory("MockOracle");
+    oracle = await Oracle.deploy();
+
+    // Prices: SPRING expensive, WINTER cheap
+    const prices = [P(4), P(2), P(1), P(0.5)];
+    await oracle.setPriceE18(spring.address, prices[0]);
+    await oracle.setPriceE18(summer.address, prices[1]);
+    await oracle.setPriceE18(autumn.address, prices[2]);
+    await oracle.setPriceE18(winter.address, prices[3]);
+
+    // Fair deterministic rates: rate(in->out) = priceIn/priceOut
     for (let i = 0; i < 4; i++) {
       for (let j = 0; j < 4; j++) {
         if (i === j) continue;
-        await dex.setRateE18(tokens[i].address, tokens[j].address, ONE);
+        const r = prices[i].mul(ethers.constants.WeiPerEther).div(prices[j]);
+        await dex.setRateE18(tokens[i].address, tokens[j].address, r);
       }
     }
 
-    // Liquidity
-    const big = ethers.utils.parseUnits("1000000", 18);
-    for (let i = 0; i < 4; i++) {
-      await tokens[i].mint(dex.address, big);
-    }
+    // Fund DEX
+    const big = P(1_000_000);
+    for (let i = 0; i < 4; i++) await tokens[i].mint(dex.address, big);
 
     const Season = await ethers.getContractFactory("SEASON");
     season = await Season.deploy(vault.address, owner.address, owner.address);
@@ -46,69 +65,56 @@ describe("SeasonRebalancer guardrail: max swaps per rebalance", function () {
 
     const Rebal = await ethers.getContractFactory("SeasonRebalancer");
     rebal = await Rebal.deploy(vault.address, dex.address, owner.address);
-
-    // Weights: equal
-    await rebal.connect(owner).setWeights([2500, 2500, 2500, 2500]);
-
-    // Hand ownership to SEASON
     await rebal.connect(owner).transferOwnership(season.address);
 
     await season.connect(owner).setRebalancer(rebal.address);
     await season.connect(owner).setVaultOperator(rebal.address);
 
-    // Disable other guardrails for clarity
-    await season.connect(owner).setRebalanceMaxTradeBps(10000);
+    await season.connect(owner).setRebalanceOracle(oracle.address);
+    await season.connect(owner).setRebalanceMinUnitGainBps(1);
+    await season.connect(owner).setRebalanceMinSpreadBps(0);
     await season.connect(owner).setRebalanceCooldownSeconds(0);
+    await season.connect(owner).setRebalanceMaxTradeBps(1000);
+    await season.connect(owner).setRebalanceMinTradeAmount(0);
+
+    // keep vault mintable
+    await season.connect(owner).setRebalanceMinComponentBalance(P(1));
+
     await season.connect(owner).setFees(0, 0);
+
+    await seedSkewedVault();
   });
 
   it("reverts when maxSwapsPerRebalance is too low for required swaps", async function () {
-    // Seed skewed vault to require multiple swaps
-    const dep = [
-      ethers.utils.parseUnits("1000", 18),
-      ethers.utils.parseUnits("100", 18),
-      ethers.utils.parseUnits("50", 18),
-      ethers.utils.parseUnits("10", 18),
-    ];
-    for (let i = 0; i < 4; i++) {
-      await tokens[i].mint(u1.address, dep[i]);
-      await tokens[i].connect(u1).approve(season.address, dep[i]);
+    // Strategy requires 1 swap. Set maxSwaps = 0 => should block.
+    await season.connect(owner).setRebalanceMaxSwapsPerRebalance(0);
+
+    let threw = false;
+    try {
+      await season.connect(owner).rebalance();
+    } catch (e) {
+      threw = true;
+      expect(e.message).to.include("MaxSwapsTooLow");
     }
-    await season.connect(u1).mintWithDeposit(dep);
-
-    // Limit swaps to 1 — should be insufficient for full adjustment (usually needs >=2)
-    await season.connect(owner).setRebalanceMaxSwapsPerRebalance(1);
-
-    await expect(season.connect(owner).rebalance()).to.be.revertedWith("MAX_SWAPS");
+    expect(threw).to.equal(true);
   });
 
-  it("succeeds when maxSwapsPerRebalance is high enough; emits <= max swaps", async function () {
-    // Same skew
-    const dep = [
-      ethers.utils.parseUnits("1000", 18),
-      ethers.utils.parseUnits("100", 18),
-      ethers.utils.parseUnits("50", 18),
-      ethers.utils.parseUnits("10", 18),
-    ];
-    for (let i = 0; i < 4; i++) {
-      await tokens[i].mint(u1.address, dep[i]);
-      await tokens[i].connect(u1).approve(season.address, dep[i]);
-    }
-    await season.connect(u1).mintWithDeposit(dep);
-
-    await season.connect(owner).setRebalanceMaxSwapsPerRebalance(10);
+  it("suc hookup: succeeds when maxSwapsPerRebalance is >= 1; emits <= max swaps", async function () {
+    await season.connect(owner).setRebalanceMaxSwapsPerRebalance(1);
 
     const tx = await season.connect(owner).rebalance();
     const rcpt = await tx.wait();
 
     const iface = rebal.interface;
-    const logs = rcpt.logs
-      .filter(l => l.address.toLowerCase() === rebal.address.toLowerCase())
-      .map(l => { try { return iface.parseLog(l); } catch { return null; } })
+    const parsed = rcpt.logs
+      .filter((l) => l.address.toLowerCase() === rebal.address.toLowerCase())
+      .map((l) => {
+        try { return iface.parseLog(l); } catch { return null; }
+      })
       .filter(Boolean);
 
-    const swaps = logs.filter(e => e.name === "SwapExecuted");
-    expect(swaps.length).to.be.lte(10);
-    expect(swaps.length).to.be.gte(1);
+    const swaps = parsed.filter((e) => e.name === "SwapExecuted");
+    expect(swaps.length).to.be.at.most(1);
+    expect(swaps.length).to.equal(1); // with our setup it should execute
   });
 });

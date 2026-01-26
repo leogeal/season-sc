@@ -96,8 +96,23 @@ describe("SEASON invariants WITH rebalances (conservation incl. DEX)", function 
     const Rebal = await ethers.getContractFactory("SeasonRebalancer");
     rebal = await Rebal.deploy(vault.address, dex.address, owner.address);
 
-    // Set equal weights while EOA owns rebalancer
-    await rebal.connect(owner).setWeights([2500, 2500, 2500, 2500]);
+    const Oracle = await ethers.getContractFactory("MockOracle");
+    oracle = await Oracle.deploy();
+
+    const P = (x) => ethers.utils.parseUnits(String(x), 18);
+    await oracle.setPriceE18(spring.address, P(4));   // most expensive
+    await oracle.setPriceE18(summer.address, P(2));
+    await oracle.setPriceE18(autumn.address, P(1));
+    await oracle.setPriceE18(winter.address, P(0.5)); // cheapest
+
+    const prices = [P(4), P(2), P(1), P(0.5)];
+    for (let i = 0; i < 4; i++) {
+      for (let j = 0; j < 4; j++) {
+	if (i === j) continue;
+	const r = prices[i].mul(ethers.constants.WeiPerEther).div(prices[j]);
+	await dex.setRateE18(tokens[i].address, tokens[j].address, r);
+      }
+    }
 
     // Transfer rebalancer ownership to SEASON so season.rebalance() can call it
     await rebal.connect(owner).transferOwnership(season.address);
@@ -105,16 +120,24 @@ describe("SEASON invariants WITH rebalances (conservation incl. DEX)", function 
     // Hook + authorize operator
     await season.connect(owner).setRebalancer(rebal.address);
     await season.connect(owner).setVaultOperator(rebal.address);
+    await season.connect(owner).setRebalanceOracle(oracle.address);
+    await season.connect(owner).setRebalanceMinUnitGainBps(0);  // 0.01% unit gain gate
+
+    await season.connect(owner).setRebalanceMinSpreadBps(0);    // don’t block by spread
+    await season.connect(owner).setRebalanceCooldownSeconds(0);
+    await season.connect(owner).setRebalanceMaxTradeBps(1000);
+    await season.connect(owner).setRebalanceMinTradeAmount(0);
+    await season.connect(owner).setRebalanceMaxSwapsPerRebalance(1);
 
     // Turn OFF fees for these invariants (strongest property)
     await season.connect(owner).setFees(0, 0);
 
     // Disable guardrails that could block rebalances (we want rebalances to happen)
-    await season.connect(owner).setRebalanceCooldownSeconds(0);
     await season.connect(owner).setRebalanceMinDriftBps(0);
     await season.connect(owner).setRebalanceMaxTradeBps(10000);
-    await season.connect(owner).setRebalanceMaxSwapsPerRebalance(0);
-    await season.connect(owner).setRebalanceMinTradeAmount(0);
+
+    await season.connect(owner).setRebalanceMinComponentBalance(P(1));
+
 
     // Pre-fund users so we never mint during the test run
     const userFloat = ethers.utils.parseUnits("5000", 18);

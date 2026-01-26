@@ -191,11 +191,10 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
 	rebalancer.rebalance();
     }
 
-    function setRebalanceWeights(uint16[4] calldata w) external onlyOwner {
-        require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
-        rebalancer.setWeights(w);
+    function setRebalanceWeights(uint16[4] calldata /*w*/) external view onlyOwner {
+	revert("WEIGHTS_DISABLED");
     }
-
+    
     function setRebalanceMaxTradeBps(uint16 bps) external onlyOwner {
 	require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
 	rebalancer.setMaxTradeBps(bps);
@@ -218,9 +217,29 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
 
     function setRebalanceMinDriftBps(uint16 bps) external onlyOwner {
 	require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
-	rebalancer.setMinDriftBps(bps);
+	rebalancer.setMinSpreadBps(bps);
     }
 
+    function setRebalanceOracle(address o) external onlyOwner {
+	require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
+	SeasonRebalancer(rebalancer).setOracle(o);
+    }
+
+    function setRebalanceMinUnitGainBps(uint16 bps) external onlyOwner {
+	require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
+	SeasonRebalancer(rebalancer).setMinUnitGainBps(bps);
+    }
+
+    function setRebalanceMinSpreadBps(uint16 bps) external onlyOwner {
+	require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
+	SeasonRebalancer(rebalancer).setMinSpreadBps(bps);
+    }
+    
+    function setRebalanceMinComponentBalance(uint256 a) external onlyOwner {
+	require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
+	SeasonRebalancer(rebalancer).setMinComponentBalance(a);
+    }
+    
     // ---------------- Internal helpers ----------------
 
     function _pullFromUser(uint256[4] memory amountsUsed) internal {
