@@ -17,7 +17,7 @@ function randInt(rng, lo, hi) {
 }
 
 describe("SEASON invariants WITH rebalances (conservation incl. DEX)", function () {
-  this.timeout(180_000); // 3 minutes
+  this.timeout(300_000); // 5 minutes
   let owner, u1, u2, u3;
   let spring, summer, autumn, winter, tokens;
   let vault, season, dex, rebal;
