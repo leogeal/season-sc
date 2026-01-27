@@ -10,3 +10,6 @@ npx hardhat help
 npx hardhat test
 REPORT_GAS=true npx hardhat test
 ```
+
+[![CI](https://github.com/leogeal/season-sc/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/leogeal/season-sc/actions/workflows/ci.yml)
+
