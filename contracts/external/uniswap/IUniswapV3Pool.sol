@@ -9,4 +9,5 @@ interface IUniswapV3Pool {
         external
         view
         returns (int56[] memory tickCumulatives, uint160[] memory secondsPerLiquidityCumulativeX128s);
+    function increaseObservationCardinalityNext(uint16 observationCardinalityNext) external;
 }

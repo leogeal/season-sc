@@ -12,25 +12,33 @@ library OracleMath {
     function consult(address pool, uint32 secondsAgo) internal view returns (int24 arithmeticMeanTick) {
         require(secondsAgo > 0, "secondsAgo=0");
 
-        uint32 [] memory secondsAgos;
+        uint32[] memory secondsAgos = new uint32[](2);
         secondsAgos[0] = secondsAgo;
         secondsAgos[1] = 0;
 
-        (int56[] memory tickCumulatives, ) = IUniswapV3Pool(pool).observe(secondsAgos);
+        // WRAPPER: try/catch to handle cases where the pool history is too short
+        try IUniswapV3Pool(pool).observe(secondsAgos) returns (int56[] memory tickCumulatives, uint160[] memory) {
+            int56 tickDelta = tickCumulatives[1] - tickCumulatives[0];
+            int56 timeDelta = int56(uint56(secondsAgo));
 
-        int56 tickDelta = tickCumulatives[1] - tickCumulatives[0];
-        int56 timeDelta = int56(uint56(secondsAgo));
+            int56 mean = tickDelta / timeDelta;
+            if (tickDelta < 0 && (tickDelta % timeDelta != 0)) mean -= 1;
 
-        // arithmeticMeanTick = tickDelta / timeDelta, rounded toward -infinity
-        int56 mean = tickDelta / timeDelta;
-        if (tickDelta < 0 && (tickDelta % timeDelta != 0)) mean -= 1;
+            require(mean >= type(int24).min && mean <= type(int24).max, "tick OOB");
+            arithmeticMeanTick = int24(mean);
+        } catch {
+            // This usually happens if 'secondsAgo' is older than the pool's oldest observation
+            revert("OracleMath: Pool has insufficient history");
+        }
+    }
 
-        require(mean >= type(int24).min && mean <= type(int24).max, "tick OOB");
-        arithmeticMeanTick = int24(mean);
+    /// @notice Expands the pool's observation cardinality if it's less than `observationCardinalityNext`.
+    /// @dev This must be called via a transaction (not view) to write to state.
+    function preparePool(address pool, uint16 cardinality) internal {
+        IUniswapV3Pool(pool).increaseObservationCardinalityNext(cardinality);
     }
 
     /// @notice Returns quoteAmount of quoteToken for baseAmount of baseToken at `tick`.
-    /// @dev Logic matches Uniswap OracleLibrary.getQuoteAtTick.
     function getQuoteAtTick(
         int24 tick,
         uint128 baseAmount,
@@ -39,7 +47,6 @@ library OracleMath {
     ) internal pure returns (uint256 quoteAmount) {
         uint160 sqrtRatioX96 = TickMath.getSqrtRatioAtTick(tick);
 
-        // ratioX192 = sqrtRatioX96^2
         if (sqrtRatioX96 <= type(uint128).max) {
             uint256 ratioX192 = uint256(sqrtRatioX96) * uint256(sqrtRatioX96);
             if (baseToken < quoteToken) {
@@ -48,7 +55,6 @@ library OracleMath {
                 quoteAmount = FullMath.mulDiv(1 << 192, baseAmount, ratioX192);
             }
         } else {
-            // Use Q128.128 to avoid overflow
             uint256 ratioX128 = FullMath.mulDiv(uint256(sqrtRatioX96), uint256(sqrtRatioX96), 1 << 64);
             if (baseToken < quoteToken) {
                 quoteAmount = FullMath.mulDiv(ratioX128, baseAmount, 1 << 128);
@@ -58,3 +64,4 @@ library OracleMath {
         }
     }
 }
+
