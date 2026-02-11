@@ -97,9 +97,9 @@ contract SeasonRebalancer is Ownable {
         uint64 n = rebalanceNonce;
         emit RebalanceStarted(n);
 
-        uint256[4] memory b = vault.balances();
-        address[4] memory t;
-        uint256[4] memory p;
+	uint256[5] memory b = vault.balances();  // 4 seasonals + WETH
+	address[4] memory t;
+	uint256[4] memory p;
 
         for (uint256 i = 0; i < 4; i++) {
             t[i] = vault.tokenAddress(i);

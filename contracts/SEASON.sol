@@ -6,34 +6,52 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 import "./SeasonVault.sol";
-
 import "./SeasonRebalancer.sol";
+
+interface IWETH {
+    function deposit() external payable;
+    function transfer(address to, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+}
 
 contract SEASON is ERC20, Ownable, ReentrancyGuard {
     using Math for uint256;
 
     SeasonVault public immutable vault;
-
     SeasonRebalancer public rebalancer;
 
-    uint256 public constant NUM_TOKENS = 4;
+    // 4 seasonals + WETH
+    uint256 public constant NUM_SEASONALS = 4;
+    uint256 public constant NUM_ASSETS = 5;
+    uint256 public constant WETH_INDEX = 4;
+
     uint256 public constant BPS_DENOM = 10_000;
 
     // Fees in basis points
-    uint16 public mintFeeBps;   // e.g. 30 = 0.30%
-    uint16 public redeemFeeBps; // e.g. 30 = 0.30%
+    uint16 public mintFeeBps;
+    uint16 public redeemFeeBps;
 
     address public feeRecipient;
 
+    // WETH + oracle (oracle returns WETH per 1 token, scaled 1e18)
+    address public WETH;
+    IPriceOracle public oracle;
+
+    // Events
     event Minted(address indexed user, uint256 sharesToUser, uint256 sharesFee, uint256[4] amountsUsed);
-    event Burned(address indexed user, uint256 sharesBurned, uint256 sharesFee, uint256[4] amountsReturned);
+    event Burned(address indexed user, uint256 sharesBurned, uint256 sharesFee, uint256[5] amountsReturned);
     event FeesUpdated(uint16 mintFeeBps, uint16 redeemFeeBps);
     event FeeRecipientUpdated(address indexed feeRecipient);
 
     event RebalancerUpdated(address indexed rebalancer);
     event VaultOperatorUpdated(address indexed operator);
+
+    event WETHUpdated(address indexed weth);
+    event OracleUpdated(address indexed oracle);
+    event MintedWithWETH(address indexed user, uint256 wethAmount, uint256 sharesToUser, uint256 sharesFee);
 
     constructor(address vaultAddr, address initialOwner, address _feeRecipient)
         ERC20("Season Index Token", "SEASON")
@@ -46,7 +64,7 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
         redeemFeeBps = 0;
     }
 
-    // ---------------- Admin (governance/treasury) ----------------
+    // ---------------- Admin ----------------
 
     function setFees(uint16 _mintFeeBps, uint16 _redeemFeeBps) external onlyOwner {
         require(_mintFeeBps <= 1_000, "MINT_FEE_TOO_HIGH");     // <= 10%
@@ -62,25 +80,53 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
         emit FeeRecipientUpdated(_feeRecipient);
     }
 
-    // ---------------- Core: mint with deposit ----------------
+    function setWETH(address weth) external onlyOwner {
+        require(weth != address(0), "WETH_ZERO");
+        WETH = weth;
+        emit WETHUpdated(weth);
+    }
 
-    /// @notice Mint SEASON shares by depositing underlying Seasonal Tokens.
-    /// @dev User supplies max amounts; contract computes exact required amounts and mints shares.
-    ///      Fee is taken in shares, rounded UP to prevent fee-avoidance via splitting.
+    function setOracle(address o) external onlyOwner {
+        require(o != address(0), "ORACLE_ZERO");
+        oracle = IPriceOracle(o);
+        emit OracleUpdated(o);
+    }
+
+    // ---------------- NAV helpers (WETH-e18) ----------------
+
+    function _amountValueWethE18(address token, uint256 amount) internal view returns (uint256) {
+        if (token == WETH) return amount; // WETH is the base
+        uint256 p = oracle.getPriceE18(token); // WETH per 1 token, scaled 1e18
+        uint8 dec = IERC20Metadata(token).decimals();
+        return Math.mulDiv(amount, p, 10 ** uint256(dec));
+    }
+
+    function _vaultNavWethE18() internal view returns (uint256 nav) {
+        uint256[5] memory b = vault.balances();
+        for (uint256 i = 0; i < NUM_ASSETS; i++) {
+            address t = vault.tokenAddress(i);
+            nav += _amountValueWethE18(t, b[i]);
+        }
+    }
+
+    // ---------------- Core: mint with pro-rata seasonal deposit ----------------
+
+    /// @notice Mint SEASON by depositing the 4 seasonal tokens pro-rata.
+    /// @dev This is your original pro-rata mint path (ignores WETH buffer).
     function mintWithDeposit(uint256[4] calldata maxAmounts)
         external
         nonReentrant
         returns (uint256 sharesToUser, uint256 sharesFee, uint256[4] memory amountsUsed)
     {
         uint256 totalShares = totalSupply();
-        uint256[4] memory b = vault.balances();
+        uint256[5] memory b5 = vault.balances();
 
         uint256 grossShares;
 
         if (totalShares == 0) {
-            // Initialization: first depositor seeds the basket.
+            // Initialization: first depositor seeds the basket (seasonals only).
             uint256 sum;
-            for (uint256 i = 0; i < NUM_TOKENS; i++) {
+            for (uint256 i = 0; i < NUM_SEASONALS; i++) {
                 require(maxAmounts[i] > 0, "INIT_ZERO_COMPONENT");
                 amountsUsed[i] = maxAmounts[i];
                 sum += maxAmounts[i];
@@ -88,29 +134,27 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
             require(sum > 0, "ZERO_INIT_SUM");
             grossShares = sum;
 
-            _pullFromUser(amountsUsed);
+            _pullSeasonalsFromUser(amountsUsed);
 
         } else {
-            // Pro-rata mint: limited by tightest component
+            // Pro-rata mint: limited by tightest seasonal component
             grossShares = type(uint256).max;
-            for (uint256 i = 0; i < NUM_TOKENS; i++) {
-                require(b[i] > 0, "VAULT_EMPTY_COMPONENT");
-                uint256 possible = (maxAmounts[i] * totalShares) / b[i];
+            for (uint256 i = 0; i < NUM_SEASONALS; i++) {
+                require(b5[i] > 0, "VAULT_EMPTY_COMPONENT");
+                uint256 possible = (maxAmounts[i] * totalShares) / b5[i];
                 if (possible < grossShares) grossShares = possible;
             }
             require(grossShares > 0, "ZERO_SHARES");
 
-            // Exact required amounts (floor). No donation.
-            for (uint256 i = 0; i < NUM_TOKENS; i++) {
-                amountsUsed[i] = Math.mulDiv(b[i], grossShares, totalShares); // floor
+            for (uint256 i = 0; i < NUM_SEASONALS; i++) {
+                amountsUsed[i] = Math.mulDiv(b5[i], grossShares, totalShares); // floor
                 require(amountsUsed[i] > 0, "ROUNDING_TO_ZERO");
                 require(amountsUsed[i] <= maxAmounts[i], "MAX_EXCEEDED");
             }
 
-            _pullFromUser(amountsUsed);
+            _pullSeasonalsFromUser(amountsUsed);
         }
 
-        // Fee in shares, rounded UP (ceil) to avoid fee evasion by splitting mints.
         sharesFee = _ceilDiv(grossShares * mintFeeBps, BPS_DENOM);
         require(sharesFee < grossShares, "FEE_GE_100PCT");
 
@@ -123,19 +167,66 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
         return (sharesToUser, sharesFee, amountsUsed);
     }
 
-    // ---------------- Core: burn to redeem ----------------
+    // ---------------- Core: mint with ETH/WETH buffer (Pattern 1) ----------------
 
-    /// @notice Burn SEASON shares to redeem pro-rata underlying.
-    /// @dev Fee is taken in shares (extra shares are charged and minted to feeRecipient),
-    ///      while underlying redeemed corresponds to the *net* shares burned.
-    ///
-    /// User pays: sharesToBurn (from their balance)
-    /// - netShares = sharesToBurn - feeShares
-    /// - underlying redeemed proportional to netShares / supplyBefore
+    /// @notice Deposit ETH -> WETH into the vault, mint shares immediately (NAV-based).
+    /// @dev Requires oracle + WETH set. Keeps bootstrap semantics: first mint should use mintWithDeposit.
+    function mintWithETH() external payable nonReentrant returns (uint256 sharesToUser, uint256 sharesFee) {
+        require(msg.value > 0, "NO_ETH");
+        require(WETH != address(0), "WETH_NOT_SET");
+        require(address(oracle) != address(0), "ORACLE_NOT_SET");
+        require(totalSupply() > 0, "INIT_USE_MINTWITHDEPOSIT");
+
+        uint256 supplyBefore = totalSupply();
+        uint256 navBefore = _vaultNavWethE18();
+        require(navBefore > 0, "BAD_NAV");
+
+        IWETH(WETH).deposit{value: msg.value}();
+        require(IWETH(WETH).transfer(address(vault), msg.value), "WETH_XFER_FAIL");
+
+        uint256 grossShares = Math.mulDiv(msg.value, supplyBefore, navBefore);
+
+        sharesFee = _ceilDiv(grossShares * mintFeeBps, BPS_DENOM);
+        require(sharesFee < grossShares, "FEE_GE_100PCT");
+
+        sharesToUser = grossShares - sharesFee;
+        _mint(msg.sender, sharesToUser);
+        if (sharesFee > 0) _mint(feeRecipient, sharesFee);
+
+        emit MintedWithWETH(msg.sender, msg.value, sharesToUser, sharesFee);
+    }
+
+    /// @notice Deposit WETH into the vault, mint shares immediately (NAV-based).
+    function mintWithWETH(uint256 amountWeth) external nonReentrant returns (uint256 sharesToUser, uint256 sharesFee) {
+        require(amountWeth > 0, "NO_WETH");
+        require(WETH != address(0), "WETH_NOT_SET");
+        require(address(oracle) != address(0), "ORACLE_NOT_SET");
+        require(totalSupply() > 0, "INIT_USE_MINTWITHDEPOSIT");
+
+        uint256 supplyBefore = totalSupply();
+        uint256 navBefore = _vaultNavWethE18();
+        require(navBefore > 0, "BAD_NAV");
+
+        require(IWETH(WETH).transferFrom(msg.sender, address(vault), amountWeth), "WETH_TF_FAIL");
+
+        uint256 grossShares = Math.mulDiv(amountWeth, supplyBefore, navBefore);
+
+        sharesFee = _ceilDiv(grossShares * mintFeeBps, BPS_DENOM);
+        require(sharesFee < grossShares, "FEE_GE_100PCT");
+
+        sharesToUser = grossShares - sharesFee;
+        _mint(msg.sender, sharesToUser);
+        if (sharesFee > 0) _mint(feeRecipient, sharesFee);
+
+        emit MintedWithWETH(msg.sender, amountWeth, sharesToUser, sharesFee);
+    }
+
+    // ---------------- Core: burn to redeem (5 assets) ----------------
+
     function burnToRedeem(uint256 sharesToBurn)
         external
         nonReentrant
-        returns (uint256 netShares, uint256 feeShares, uint256[4] memory amountsReturned)
+        returns (uint256 netShares, uint256 feeShares, uint256[5] memory amountsReturned)
     {
         require(sharesToBurn > 0, "ZERO_BURN");
         require(balanceOf(msg.sender) >= sharesToBurn, "INSUFFICIENT_SHARES");
@@ -143,113 +234,105 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
         uint256 supplyBefore = totalSupply();
         require(supplyBefore > 0, "NO_SUPPLY");
 
-        // Fee in shares, rounded UP (ceil) to prevent fee evasion by splitting burns.
         feeShares = _ceilDiv(sharesToBurn * redeemFeeBps, BPS_DENOM);
         require(feeShares < sharesToBurn, "FEE_GE_100PCT");
 
         netShares = sharesToBurn - feeShares;
 
-        uint256[4] memory b = vault.balances();
+        uint256[5] memory b = vault.balances();
 
-        // amountsReturned = floor(b[i] * netShares / supplyBefore)
-        for (uint256 i = 0; i < NUM_TOKENS; i++) {
+        for (uint256 i = 0; i < NUM_ASSETS; i++) {
             amountsReturned[i] = Math.mulDiv(b[i], netShares, supplyBefore);
         }
 
-        // Effects: burn full sharesToBurn from user
         _burn(msg.sender, sharesToBurn);
 
-        // Mint fee shares to recipient (so total supply decreases by netShares)
         if (feeShares > 0) _mint(feeRecipient, feeShares);
 
-        // Interactions: withdraw underlying for netShares portion
         vault.withdrawTo(msg.sender, amountsReturned);
 
         emit Burned(msg.sender, sharesToBurn, feeShares, amountsReturned);
         return (netShares, feeShares, amountsReturned);
     }
 
-    /// @notice Set the rebalancer module. This does not automatically authorize it in the vault.
+    // ---------------- Rebalancer wiring ----------------
+
     function setRebalancer(address rebalancerAddr) external onlyOwner {
-	require(rebalancerAddr != address(0), "REBALANCER_ZERO");
-	rebalancer = SeasonRebalancer(rebalancerAddr);
-	emit RebalancerUpdated(rebalancerAddr);
+        require(rebalancerAddr != address(0), "REBALANCER_ZERO");
+        rebalancer = SeasonRebalancer(rebalancerAddr);
+        emit RebalancerUpdated(rebalancerAddr);
     }
 
-    /// @notice Authorize an operator in the vault (typically the rebalancer).
-    /// @dev SEASON owns the vault, so SEASON can set the operator directly.
     function setVaultOperator(address operatorAddr) external onlyOwner {
-	vault.setOperator(operatorAddr);
-	emit VaultOperatorUpdated(operatorAddr);
+        vault.setOperator(operatorAddr);
+        emit VaultOperatorUpdated(operatorAddr);
     }
 
-    /// @notice Run a rebalance via the configured rebalancer module.
-    /// @dev For safety, keep this onlyOwner initially. You can later add keeper logic.
     function rebalance() external onlyOwner {
-	address r = address(rebalancer);
-	require(r != address(0), "REBALANCER_NOT_SET");
-	rebalancer.rebalance(0);
+        address r = address(rebalancer);
+        require(r != address(0), "REBALANCER_NOT_SET");
+        rebalancer.rebalance(0);
     }
 
     function rebalanceWithMinOut(uint256 minAmountOut) external onlyOwner {
-	address r = address(rebalancer);
-	require(r != address(0), "REBALANCER_NOT_SET");
-	rebalancer.rebalance(minAmountOut);
+        address r = address(rebalancer);
+        require(r != address(0), "REBALANCER_NOT_SET");
+        rebalancer.rebalance(minAmountOut);
     }
 
     function setRebalanceWeights(uint16[4] calldata /*w*/) external view onlyOwner {
-	revert("WEIGHTS_DISABLED");
+        revert("WEIGHTS_DISABLED");
     }
-    
+
     function setRebalanceMaxTradeBps(uint16 bps) external onlyOwner {
-	require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
-	rebalancer.setMaxTradeBps(bps);
+        require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
+        rebalancer.setMaxTradeBps(bps);
     }
 
     function setRebalanceCooldownSeconds(uint32 secs) external onlyOwner {
-	require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
-	rebalancer.setCooldownSeconds(secs);
+        require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
+        rebalancer.setCooldownSeconds(secs);
     }
 
     function setRebalanceMaxSwapsPerRebalance(uint8 n) external onlyOwner {
-	require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
-	rebalancer.setMaxSwapsPerRebalance(n);
+        require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
+        rebalancer.setMaxSwapsPerRebalance(n);
     }
 
     function setRebalanceMinTradeAmount(uint256 amt) external onlyOwner {
-	require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
-	rebalancer.setMinTradeAmount(amt);
+        require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
+        rebalancer.setMinTradeAmount(amt);
     }
 
     function setRebalanceMinDriftBps(uint16 bps) external onlyOwner {
-	require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
-	rebalancer.setMinSpreadBps(bps);
+        require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
+        rebalancer.setMinSpreadBps(bps);
     }
 
     function setRebalanceOracle(address o) external onlyOwner {
-	require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
-	SeasonRebalancer(rebalancer).setOracle(o);
+        require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
+        rebalancer.setOracle(o);
     }
 
     function setRebalanceMinUnitGainBps(uint16 bps) external onlyOwner {
-	require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
-	SeasonRebalancer(rebalancer).setMinUnitGainBps(bps);
+        require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
+        rebalancer.setMinUnitGainBps(bps);
     }
 
     function setRebalanceMinSpreadBps(uint16 bps) external onlyOwner {
-	require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
-	SeasonRebalancer(rebalancer).setMinSpreadBps(bps);
+        require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
+        rebalancer.setMinSpreadBps(bps);
     }
-    
+
     function setRebalanceMinComponentBalance(uint256 a) external onlyOwner {
-	require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
-	SeasonRebalancer(rebalancer).setMinComponentBalance(a);
+        require(address(rebalancer) != address(0), "REBALANCER_NOT_SET");
+        rebalancer.setMinComponentBalance(a);
     }
-    
+
     // ---------------- Internal helpers ----------------
 
-    function _pullFromUser(uint256[4] memory amountsUsed) internal {
-        for (uint256 i = 0; i < NUM_TOKENS; i++) {
+    function _pullSeasonalsFromUser(uint256[4] memory amountsUsed) internal {
+        for (uint256 i = 0; i < NUM_SEASONALS; i++) {
             IERC20 t = IERC20(vault.tokenAddress(i));
             require(t.transferFrom(msg.sender, address(vault), amountsUsed[i]), "TRANSFER_FROM_FAILED");
         }
@@ -258,5 +341,9 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
     function _ceilDiv(uint256 a, uint256 b) internal pure returns (uint256) {
         if (a == 0) return 0;
         return (a + b - 1) / b;
+    }
+
+    receive() external payable {
+        revert("USE_MINTWITHETH");
     }
 }

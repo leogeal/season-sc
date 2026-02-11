@@ -9,6 +9,7 @@ function ceilDiv(a, b) {
 describe("SEASON fee splitting (ceil rounding) anti-evasion", function () {
   let owner, user;
   let spring, summer, autumn, winter, tokens;
+  let weth;
   let vault, season;
 
   beforeEach(async function () {
@@ -19,11 +20,13 @@ describe("SEASON fee splitting (ceil rounding) anti-evasion", function () {
     summer = await Mock.deploy("SUMMER", "SUM");
     autumn = await Mock.deploy("AUTUMN", "AUT");
     winter = await Mock.deploy("WINTER", "WIN");
-    tokens = [spring, summer, autumn, winter];
+    weth   = await Mock.deploy("WETH", "WETH");   // new 5th token
+    tokens = [spring, summer, autumn, winter, weth];
 
     const Vault = await ethers.getContractFactory("SeasonVault");
     vault = await Vault.deploy(
-      [spring.address, summer.address, autumn.address, winter.address],
+      [spring.address, summer.address, autumn.address, winter.address,
+       weth.address],
       owner.address
     );
 
