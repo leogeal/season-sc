@@ -10,6 +10,7 @@ import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 import "./SeasonVault.sol";
 import "./SeasonRebalancer.sol";
+import "./interfaces/IPriceOracle.sol";
 
 interface IWrappedNative {
     function deposit() external payable;

@@ -6,10 +6,7 @@ import "@openzeppelin/contracts/utils/math/Math.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 import "./SeasonVault.sol";
-
-interface IPriceOracle {
-    function getPriceE18(address token) external view returns (uint256);
-}
+import "./interfaces/IPriceOracle.sol";
 
 interface IDexAdapter {
     function swapExactIn(
