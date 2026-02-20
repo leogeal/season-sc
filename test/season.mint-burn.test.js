@@ -6,7 +6,7 @@ function bn(x) { return ethers.BigNumber.from(x); }
 describe("SEASON: mint then burn redeem", function () {
   let owner, user1, user2;
   let spring, summer, autumn, winter;
-  let weth;
+  let wrappedNative;
   let vault, season;
 
   beforeEach(async function () {
@@ -17,12 +17,12 @@ describe("SEASON: mint then burn redeem", function () {
     summer = await Mock.deploy("SUMMER", "SUM");
     autumn = await Mock.deploy("AUTUMN", "AUT");
     winter = await Mock.deploy("WINTER", "WIN");
-    weth   = await Mock.deploy("WETH", "WETH");   // new 5th token
+    wrappedNative = await Mock.deploy("WrappedNative", "WN");   // 5th token (WETH/WPOL)
 
     const Vault = await ethers.getContractFactory("SeasonVault");
     vault = await Vault.deploy(
       [spring.address, summer.address, autumn.address, winter.address,
-       weth.address],
+       wrappedNative.address],
       owner.address
     );
 

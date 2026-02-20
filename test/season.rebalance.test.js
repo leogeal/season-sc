@@ -4,7 +4,7 @@ const { ethers } = require("hardhat");
 describe("SEASON rebalancing (module + MockDex) [expensive -> cheap]", function () {
   let owner, u1;
   let spring, summer, autumn, winter, tokens;
-  let weth;
+  let wrappedNative;
   let vault, season, dex, rebal, oracle;
 
   const P = (x) => ethers.utils.parseUnits(String(x), 18);
@@ -31,13 +31,13 @@ describe("SEASON rebalancing (module + MockDex) [expensive -> cheap]", function 
     summer = await Mock.deploy("SUMMER", "SUM");
     autumn = await Mock.deploy("AUTUMN", "AUT");
     winter = await Mock.deploy("WINTER", "WIN");
-    weth   = await Mock.deploy("WETH", "WETH");   // new 5th token
-    tokens = [spring, summer, autumn, winter, weth];
+    wrappedNative = await Mock.deploy("WrappedNative", "WN");   // 5th token (WETH/WPOL)
+    tokens = [spring, summer, autumn, winter, wrappedNative];
 
     const Vault = await ethers.getContractFactory("SeasonVault");
     vault = await Vault.deploy(
       [spring.address, summer.address, autumn.address, winter.address,
-       weth.address],
+       wrappedNative.address],
       owner.address
     );
 

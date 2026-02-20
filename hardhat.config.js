@@ -14,7 +14,20 @@ module.exports = {
         "*": {
           "*": ["abi", "evm.bytecode", "evm.deployedBytecode", "metadata"],
         },
-      },	
+      },
+    },
+  },
+  networks: {
+    hardhat: {},
+    polygon: {
+      url: process.env.POLYGON_RPC_URL || "https://polygon-rpc.com",
+      chainId: 137,
+      accounts: process.env.DEPLOYER_PRIVATE_KEY ? [process.env.DEPLOYER_PRIVATE_KEY] : [],
+    },
+    mainnet: {
+      url: process.env.MAINNET_RPC_URL || "",
+      chainId: 1,
+      accounts: process.env.DEPLOYER_PRIVATE_KEY ? [process.env.DEPLOYER_PRIVATE_KEY] : [],
     },
   },
 };

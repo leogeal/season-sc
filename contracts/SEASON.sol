@@ -11,7 +11,7 @@ import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "./SeasonVault.sol";
 import "./SeasonRebalancer.sol";
 
-interface IWETH {
+interface IWrappedNative {
     function deposit() external payable;
     function transfer(address to, uint256 amount) external returns (bool);
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
@@ -23,10 +23,10 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
     SeasonVault public immutable vault;
     SeasonRebalancer public rebalancer;
 
-    // 4 seasonals + WETH
+    // 4 seasonals + wrapped native (WETH on Ethereum, WPOL on Polygon, etc.)
     uint256 public constant NUM_SEASONALS = 4;
     uint256 public constant NUM_ASSETS = 5;
-    uint256 public constant WETH_INDEX = 4;
+    uint256 public constant WRAPPED_NATIVE_INDEX = 4;
 
     uint256 public constant BPS_DENOM = 10_000;
 
@@ -36,8 +36,8 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
 
     address public feeRecipient;
 
-    // WETH + oracle (oracle returns WETH per 1 token, scaled 1e18)
-    address public WETH;
+    // Wrapped native token + oracle (oracle returns wrapped native per 1 token, scaled 1e18)
+    address public wrappedNative;
     IPriceOracle public oracle;
 
     // Events
@@ -49,9 +49,9 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
     event RebalancerUpdated(address indexed rebalancer);
     event VaultOperatorUpdated(address indexed operator);
 
-    event WETHUpdated(address indexed weth);
+    event WrappedNativeUpdated(address indexed wrappedNative);
     event OracleUpdated(address indexed oracle);
-    event MintedWithWETH(address indexed user, uint256 wethAmount, uint256 sharesToUser, uint256 sharesFee);
+    event MintedWithWrappedNative(address indexed user, uint256 amount, uint256 sharesToUser, uint256 sharesFee);
 
     constructor(address vaultAddr, address initialOwner, address _feeRecipient)
         ERC20("Season Index Token", "SEASON")
@@ -80,10 +80,10 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
         emit FeeRecipientUpdated(_feeRecipient);
     }
 
-    function setWETH(address weth) external onlyOwner {
-        require(weth != address(0), "WETH_ZERO");
-        WETH = weth;
-        emit WETHUpdated(weth);
+    function setWrappedNative(address _wrappedNative) external onlyOwner {
+        require(_wrappedNative != address(0), "WRAPPED_NATIVE_ZERO");
+        wrappedNative = _wrappedNative;
+        emit WrappedNativeUpdated(_wrappedNative);
     }
 
     function setOracle(address o) external onlyOwner {
@@ -92,27 +92,27 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
         emit OracleUpdated(o);
     }
 
-    // ---------------- NAV helpers (WETH-e18) ----------------
+    // ---------------- NAV helpers ----------------
 
-    function _amountValueWethE18(address token, uint256 amount) internal view returns (uint256) {
-        if (token == WETH) return amount; // WETH is the base
-        uint256 p = oracle.getPriceE18(token); // WETH per 1 token, scaled 1e18
+    function _amountValueInBase(address token, uint256 amount) internal view returns (uint256) {
+        if (token == wrappedNative) return amount; // wrapped native is the base
+        uint256 p = oracle.getPriceE18(token); // base per 1 token, scaled 1e18
         uint8 dec = IERC20Metadata(token).decimals();
         return Math.mulDiv(amount, p, 10 ** uint256(dec));
     }
 
-    function _vaultNavWethE18() internal view returns (uint256 nav) {
+    function _vaultNavInBase() internal view returns (uint256 nav) {
         uint256[5] memory b = vault.balances();
         for (uint256 i = 0; i < NUM_ASSETS; i++) {
             address t = vault.tokenAddress(i);
-            nav += _amountValueWethE18(t, b[i]);
+            nav += _amountValueInBase(t, b[i]);
         }
     }
 
     // ---------------- Core: mint with pro-rata seasonal deposit ----------------
 
     /// @notice Mint SEASON by depositing the 4 seasonal tokens pro-rata.
-    /// @dev This is your original pro-rata mint path (ignores WETH buffer).
+    /// @dev This is your original pro-rata mint path (ignores wrapped native buffer).
     function mintWithDeposit(uint256[4] calldata maxAmounts)
         external
         nonReentrant
@@ -167,22 +167,22 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
         return (sharesToUser, sharesFee, amountsUsed);
     }
 
-    // ---------------- Core: mint with ETH/WETH buffer (Pattern 1) ----------------
+    // ---------------- Core: mint with native / wrapped native ----------------
 
-    /// @notice Deposit ETH -> WETH into the vault, mint shares immediately (NAV-based).
-    /// @dev Requires oracle + WETH set. Keeps bootstrap semantics: first mint should use mintWithDeposit.
-    function mintWithETH() external payable nonReentrant returns (uint256 sharesToUser, uint256 sharesFee) {
-        require(msg.value > 0, "NO_ETH");
-        require(WETH != address(0), "WETH_NOT_SET");
+    /// @notice Deposit native currency (ETH/POL) -> wrapped native into the vault, mint shares (NAV-based).
+    /// @dev Requires oracle + wrappedNative set. First mint must use mintWithDeposit.
+    function mintWithNative() external payable nonReentrant returns (uint256 sharesToUser, uint256 sharesFee) {
+        require(msg.value > 0, "NO_VALUE");
+        require(wrappedNative != address(0), "WRAPPED_NATIVE_NOT_SET");
         require(address(oracle) != address(0), "ORACLE_NOT_SET");
         require(totalSupply() > 0, "INIT_USE_MINTWITHDEPOSIT");
 
         uint256 supplyBefore = totalSupply();
-        uint256 navBefore = _vaultNavWethE18();
+        uint256 navBefore = _vaultNavInBase();
         require(navBefore > 0, "BAD_NAV");
 
-        IWETH(WETH).deposit{value: msg.value}();
-        require(IWETH(WETH).transfer(address(vault), msg.value), "WETH_XFER_FAIL");
+        IWrappedNative(wrappedNative).deposit{value: msg.value}();
+        require(IWrappedNative(wrappedNative).transfer(address(vault), msg.value), "WRAPPED_NATIVE_XFER_FAIL");
 
         uint256 grossShares = Math.mulDiv(msg.value, supplyBefore, navBefore);
 
@@ -193,23 +193,23 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
         _mint(msg.sender, sharesToUser);
         if (sharesFee > 0) _mint(feeRecipient, sharesFee);
 
-        emit MintedWithWETH(msg.sender, msg.value, sharesToUser, sharesFee);
+        emit MintedWithWrappedNative(msg.sender, msg.value, sharesToUser, sharesFee);
     }
 
-    /// @notice Deposit WETH into the vault, mint shares immediately (NAV-based).
-    function mintWithWETH(uint256 amountWeth) external nonReentrant returns (uint256 sharesToUser, uint256 sharesFee) {
-        require(amountWeth > 0, "NO_WETH");
-        require(WETH != address(0), "WETH_NOT_SET");
+    /// @notice Deposit wrapped native token (WETH/WPOL) into the vault, mint shares (NAV-based).
+    function mintWithWrappedNative(uint256 amount) external nonReentrant returns (uint256 sharesToUser, uint256 sharesFee) {
+        require(amount > 0, "NO_WRAPPED_NATIVE");
+        require(wrappedNative != address(0), "WRAPPED_NATIVE_NOT_SET");
         require(address(oracle) != address(0), "ORACLE_NOT_SET");
         require(totalSupply() > 0, "INIT_USE_MINTWITHDEPOSIT");
 
         uint256 supplyBefore = totalSupply();
-        uint256 navBefore = _vaultNavWethE18();
+        uint256 navBefore = _vaultNavInBase();
         require(navBefore > 0, "BAD_NAV");
 
-        require(IWETH(WETH).transferFrom(msg.sender, address(vault), amountWeth), "WETH_TF_FAIL");
+        require(IWrappedNative(wrappedNative).transferFrom(msg.sender, address(vault), amount), "WRAPPED_NATIVE_TF_FAIL");
 
-        uint256 grossShares = Math.mulDiv(amountWeth, supplyBefore, navBefore);
+        uint256 grossShares = Math.mulDiv(amount, supplyBefore, navBefore);
 
         sharesFee = _ceilDiv(grossShares * mintFeeBps, BPS_DENOM);
         require(sharesFee < grossShares, "FEE_GE_100PCT");
@@ -218,7 +218,7 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
         _mint(msg.sender, sharesToUser);
         if (sharesFee > 0) _mint(feeRecipient, sharesFee);
 
-        emit MintedWithWETH(msg.sender, amountWeth, sharesToUser, sharesFee);
+        emit MintedWithWrappedNative(msg.sender, amount, sharesToUser, sharesFee);
     }
 
     // ---------------- Core: burn to redeem (5 assets) ----------------
@@ -344,6 +344,6 @@ contract SEASON is ERC20, Ownable, ReentrancyGuard {
     }
 
     receive() external payable {
-        revert("USE_MINTWITHETH");
+        revert("USE_MINTWITHNATIVE");
     }
 }

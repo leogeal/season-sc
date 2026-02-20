@@ -4,7 +4,7 @@ const { ethers } = require("hardhat");
 describe("SEASON rebalance: expensive -> cheap (raw unit objective)", function () {
   let owner, u1;
   let spring, summer, autumn, winter, tokens;
-  let weth;
+  let wrappedNative;
   let vault, season, dex, rebal, oracle;
 
   beforeEach(async function () {
@@ -15,11 +15,11 @@ describe("SEASON rebalance: expensive -> cheap (raw unit objective)", function (
     summer = await Mock.deploy("SUMMER", "SUM");
     autumn = await Mock.deploy("AUTUMN", "AUT");
     winter = await Mock.deploy("WINTER", "WIN");
-    weth   = await Mock.deploy("WETH", "WETH");   // new 5th token
-    tokens = [spring, summer, autumn, winter, weth];
+    wrappedNative = await Mock.deploy("WrappedNative", "WN");   // 5th token (WETH/WPOL)
+    tokens = [spring, summer, autumn, winter, wrappedNative];
 
     const Vault = await ethers.getContractFactory("SeasonVault");
-    vault = await Vault.deploy([spring.address, summer.address, autumn.address, winter.address, weth.address], owner.address);
+    vault = await Vault.deploy([spring.address, summer.address, autumn.address, winter.address, wrappedNative.address], owner.address);
 
     const Dex = await ethers.getContractFactory("MockDex");
     dex = await Dex.deploy(owner.address);

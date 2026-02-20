@@ -19,7 +19,7 @@ function randInt(rng, lo, hi) {
 describe("SEASON invariants WITH rebalances (non-1:1 deterministic rates)", function () {
   let owner, u1, u2, u3;
   let spring, summer, autumn, winter, tokens;
-  let weth;
+  let wrappedNative;
   let vault, season, dex, rebal, oracle;
 
   this.timeout(90_000);
@@ -82,8 +82,8 @@ describe("SEASON invariants WITH rebalances (non-1:1 deterministic rates)", func
     summer = await Mock.deploy("SUMMER", "SUM");
     autumn = await Mock.deploy("AUTUMN", "AUT");
     winter = await Mock.deploy("WINTER", "WIN");
-    weth   = await Mock.deploy("WETH", "WETH");   // new 5th token
-    tokens = [spring, summer, autumn, winter, weth];
+    wrappedNative = await Mock.deploy("WrappedNative", "WN");   // 5th token (WETH/WPOL)
+    tokens = [spring, summer, autumn, winter, wrappedNative];
 
     // Give u2/u3 inventories so fuzz mint/burn can run, and approve once.
     const Max = ethers.constants.MaxUint256;
@@ -98,7 +98,7 @@ describe("SEASON invariants WITH rebalances (non-1:1 deterministic rates)", func
     const Vault = await ethers.getContractFactory("SeasonVault");
     vault = await Vault.deploy(
       [spring.address, summer.address, autumn.address, winter.address,
-       weth.address],
+       wrappedNative.address],
       owner.address
     );
 

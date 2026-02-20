@@ -5,7 +5,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract SeasonVault is Ownable {
-    // SPRING, SUMMER, AUTUMN, WINTER, WETH
+    // SPRING, SUMMER, AUTUMN, WINTER, wrapped native (WETH/WPOL)
     IERC20[5] public tokens;
 
     address public operator;

@@ -7,11 +7,12 @@ import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "../external/uniswap/IUniswapV3Factory.sol";
 import "../external/uniswap/OracleMath.sol";
 
-/// @notice Minimal TWAP oracle that returns priceE18[token] in terms of a chosen base token (e.g. WETH).
+/// @notice Minimal TWAP oracle that returns priceE18[token] in terms of a chosen base token
+///         (e.g. WETH on Ethereum, WPOL on Polygon).
 /// @dev Requires an existing Uniswap V3 pool (token, base, fee) with enough observations.
 contract UniswapV3TwapOracle is Ownable {
     IUniswapV3Factory public immutable factory;
-    address public immutable base; // e.g., WETH
+    address public immutable base; // e.g., WETH on Ethereum, WPOL on Polygon
 
     struct Config {
         uint24 fee;          // pool fee tier for (token, base)

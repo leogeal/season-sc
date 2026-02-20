@@ -20,14 +20,15 @@ interface IQuoterV2 {
 }
 
 /// @notice Adapter that can swap tokenIn->tokenOut on Uniswap V3.
-///         If no direct pool exists, it routes tokenIn->WETH->tokenOut (2-hop),
+///         If no direct pool exists, it routes tokenIn->base->tokenOut (2-hop),
 ///         assuming pools exist for each leg.
+///         `base` is the wrapped native token (WETH on Ethereum, WPOL on Polygon, etc.).
 contract UniswapV3DexAdapter is Ownable {
     using SafeERC20 for IERC20;
 
     ISwapRouter02 public immutable router;
     IUniswapV3Factory public immutable factory;
-    address public immutable base; // WETH
+    address public immutable base; // wrapped native (WETH, WPOL, etc.)
 
     IQuoterV2 public immutable quoter;
 
