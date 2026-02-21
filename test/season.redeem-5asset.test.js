@@ -158,22 +158,32 @@ describe("SEASON: 5-asset redemption (seasonals + wrappedNative)", function () {
     }
   });
 
-  it("round-trip: mintWithNative -> burnToRedeem returns wrappedNative (no profit, fees=0)", async function () {
+  it("round-trip: mintWithNative -> burnToRedeem returns equivalent value (no profit, fees=0)", async function () {
     const depositNative = P(100);
 
     await season.connect(user).mintWithNative({ value: depositNative });
     const shares = await season.balanceOf(user.address);
 
-    const wnBefore = await wrappedNative.balanceOf(user.address);
+    const balBefore = await allBalances(user.address);
 
     await season.connect(user).burnToRedeem(shares);
 
-    const wnAfter = await wrappedNative.balanceOf(user.address);
-    const wnRedeemed = wnAfter.sub(wnBefore);
+    const balAfter = await allBalances(user.address);
 
-    // With fees=0 and immediate round-trip, user cannot profit. Allow small dust.
-    expect(wnRedeemed).to.be.lte(depositNative);
-    const loss = depositNative.sub(wnRedeemed);
+    // Redeemed amounts across all 5 assets
+    const springRedeemed = balAfter.spring.sub(balBefore.spring);
+    const summerRedeemed = balAfter.summer.sub(balBefore.summer);
+    const autumnRedeemed = balAfter.autumn.sub(balBefore.autumn);
+    const winterRedeemed = balAfter.winter.sub(balBefore.winter);
+    const wnRedeemed = balAfter.wn.sub(balBefore.wn);
+
+    // All oracle prices are 1:1, so total value = sum of all redeemed amounts
+    const totalValueRedeemed = springRedeemed.add(summerRedeemed)
+      .add(autumnRedeemed).add(winterRedeemed).add(wnRedeemed);
+
+    // With fees=0, the redeemed value should be close to the deposited amount (within dust)
+    expect(totalValueRedeemed).to.be.lte(depositNative);
+    const loss = depositNative.sub(totalValueRedeemed);
     expect(loss).to.be.lte(bn(20)); // tight dust bound
   });
 
